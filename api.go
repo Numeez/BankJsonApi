@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
 )
+
+//eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhY2NvdW50TnVtYmVyIjo3MzY3MzkxLCJleHBpcmVzQXQiOjE1MDAwfQ.Hf614ICFmSiEZ7PTdJMhtYsUV9Xa-N6NGfedjCqrwTU
+
 
 type apiFunc func(w http.ResponseWriter, r *http.Request) error
 type ApiError struct {
@@ -30,7 +36,8 @@ func (s *ApiServer) Run() {
 	router := mux.NewRouter()
 
 	router.HandleFunc("/account", makeHttpHandleFunc(s.handleAccount))
-	router.HandleFunc("/account/{id}", makeHttpHandleFunc(s.handleGetAccountById))
+
+	router.HandleFunc("/account/{id}", withJWTAuth(makeHttpHandleFunc(s.handleGetAccountById),s.store))
 	router.HandleFunc("/transfer",makeHttpHandleFunc(s.handleTransfer))
 	log.Println("Json Api server running on the port", s.listenAddr)
 	http.ListenAndServe(s.listenAddr, router)
@@ -84,6 +91,11 @@ func (s *ApiServer) handleCreateAccount(w http.ResponseWriter, r *http.Request) 
 	if err:=s.store.CreateAccount(account);err!=nil{
 		return err
 	}
+	tokenString,err:=createJWT(account)
+	if err!=nil{
+		return err
+	}
+	fmt.Println("JWT Token string : ",tokenString)
 	return WriteJson(w,http.StatusOK,account)
 
 }
@@ -127,4 +139,71 @@ func getID(r *http.Request) (int,error){
 		return Id,fmt.Errorf("invalid id is given %s",id)
 	}
 	return Id,err
+}
+
+func permissionDenied(w http.ResponseWriter){
+	WriteJson(w,http.StatusForbidden,ApiError{Error:"Permission Denied"})
+}
+
+func withJWTAuth(handleFunc http.HandlerFunc , store Storage) http.HandlerFunc{
+	
+	return func (w http.ResponseWriter , r *http.Request){
+		fmt.Println("Calling jwt middleware")
+		tokenString:=r.Header.Get("jwt-token")
+		token,err:=validateJWT(tokenString)
+		if err!=nil{
+			permissionDenied(w)
+			return
+		}
+		if !token.Valid{
+			permissionDenied(w)
+			return
+
+		}
+		userID,err:= getID(r)
+		if err!=nil{
+			permissionDenied(w)
+			return
+		}
+		account,err:=store.GetAccountById(userID)
+		if err!=nil{
+			permissionDenied(w)
+			return
+		}
+		
+		claims:= token.Claims.(jwt.MapClaims)
+		
+		
+		if account.Number!=int64(claims["accountNumber"].(float64)){
+			permissionDenied(w)
+			return
+		}
+		handleFunc(w,r)
+		
+
+	}
+}
+
+func validateJWT(token string) (*jwt.Token,error){
+	godotenv.Load()
+	secret:=os.Getenv("SECRET_TOKEN")
+	return jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
+		// Don't forget to validate the alg is what you expect:
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+	
+		// hmacSampleSecret is a []byte containing your secret, e.g. []byte("my_secret_key")
+		return []byte(secret), nil
+	})
+}
+func createJWT(account *Account) (string,error) {
+	godotenv.Load()
+	claims:=&jwt.MapClaims{
+		"expiresAt":15000 ,
+		"accountNumber":account.Number,
+	}
+	secret:=os.Getenv("SECRET_TOKEN")
+	token:=jwt.NewWithClaims(jwt.SigningMethodHS256,claims)
+	return token.SignedString([]byte(secret))
 }
